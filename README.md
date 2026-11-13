@@ -26,6 +26,10 @@ Short dumps in detail:
 
 Read-only: it changes nothing in the system.
 
+**No AI API? Use the AI export.** Output "AI export file" saves all collected facts as one Markdown file
+(with user, system and server names; optional anonymization) that you upload into a browser AI together with the prompt in
+[AI_REPORT_PROMPT.md](AI_REPORT_PROMPT.md). Example file: [examples/ai_export_example.md](examples/ai_export_example.md).
+
 ## Run
 SE38 → `ZDUMP_EXPLAINER`
 
@@ -37,12 +41,14 @@ SE38 → `ZDUMP_EXPLAINER`
 | User, Client | optional filters (short dumps and system log) |
 | Runtime error, App server | optional filters (short dumps) |
 | Only own code | only dumps in Z/Y/namespace programs |
-| HTML report / ALV overview | how to show the result (ALV covers short dumps only) |
-| Save HTML to file | e.g. `C:\temp\dumps.html` to share by e-mail |
+| HTML report / ALV overview / AI export file | how to show the result (ALV covers short dumps only) |
+| Save to file | HTML report: e.g. `C:\temp\dumps.html` to share by e-mail. AI export: empty = save dialog |
+| Anonymize users and servers | AI export: replace names by USER_nn / SERVER_nn (default off) |
+| Include source code | AI export: 7 source lines around each failing line (default on) |
 | Text language | for SAP's error texts |
 
 **Daily job:** save a variant (e.g. date = yesterday via dynamic date selection) and schedule it in SM36.
-In background it writes a plain list to the spool.
+In background it writes a plain list to the spool - or, with "AI export file", the export text.
 
 ## Files
 | File | Purpose |
@@ -51,13 +57,16 @@ In background it writes a plain list to the spool.
 | `CLAUDE.md` | instructions for Claude Code (system facts and coding rules) |
 | `SETUP_CLAUDE_CODE.md` | connect Claude Code to the SAP VM via ADT |
 | `PROMPT.md` | ready-made prompt to deploy and test the program |
+| `AI_REPORT_PROMPT.md` | how to use the AI export, and the prompt for the browser AI |
+| `examples/ai_export_example.md` | an AI export from the practice system (anonymized) |
 | `abaplint.json` | syntax check config for ABAP 7.50 |
 
 ## Notes
 - Deployed and tested on the NPL practice system (7.52, SAP ASE); the background list was verified via a test job.
 - Structure: `lcl_report` (selection screen, output) uses the sections `lcl_dump_section`, `lcl_syslog` and
   `lcl_dbcheck` through the interface `lif_section`; `lcl_util` holds shared helpers.
-- ABAP Unit tests are at the end of the program (23 tests, risk level harmless, no database access):
+- `lcl_anonymizer` replaces user and server names in the AI export, also inside free texts.
+- ABAP Unit tests are at the end of the program (26 tests, risk level harmless, no database access):
   SE38/SE80 → Program → Test → Unit Test, or Ctrl+Shift+F10 in Eclipse.
 - Up to 5000 dumps per run (newest first).
 - The system log is read from the local application server instance only.

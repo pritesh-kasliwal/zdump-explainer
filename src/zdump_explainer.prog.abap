@@ -26,6 +26,10 @@
 *&
 *& - Output: HTML report (foreground) and/or download, ALV overview
 *&   (short dumps only), or a simple list when running in background
+*& - AI export: one Markdown file with all collected facts (no ready-made
+*&   explanations), to upload into a browser AI together with the prompt
+*&   in AI_REPORT_PROMPT.md. User and server names are kept; they can be
+*&   replaced by aliases with "Anonymize users and servers".
 *&
 *& ABAP 7.50. Read-only: the program changes nothing in the system.
 *&
@@ -35,11 +39,14 @@
 *&   S_DATUM Date        S_UNAME User         S_ERRID Runtime error
 *&   S_MANDT Client      S_AHOST App server   P_CUST  Only own code (Z/Y)
 *&   P_HTML  HTML report P_ALV   ALV overview (short dumps)
-*&   P_FILE  Save HTML to file   P_LANG  Text language for SAP texts
+*&   P_AI    AI export file (for a browser AI)
+*&   P_FILE  Save to file (HTML / AI export)
+*&   P_ANON  Anonymize users and servers         P_AISRC Include source code
+*&   P_LANG  Text language for SAP texts
 *& Text symbols: B01 'Period and filters', B02 'Output',
 *&               B03 'What to analyse'
 *&---------------------------------------------------------------------*
-REPORT zdump_explainer.
+REPORT zdump_explainer LINE-SIZE 1023.     " wide spool list for the AI export in background
 
 TABLES snap_beg.
 
@@ -62,10 +69,13 @@ PARAMETERS p_cust AS CHECKBOX.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
-PARAMETERS: p_html RADIOBUTTON GROUP out DEFAULT 'X',
-            p_alv  RADIOBUTTON GROUP out,
-            p_file TYPE string LOWER CASE,
-            p_lang TYPE sylangu DEFAULT sy-langu.
+PARAMETERS: p_html  RADIOBUTTON GROUP out DEFAULT 'X',
+            p_alv   RADIOBUTTON GROUP out,
+            p_ai    RADIOBUTTON GROUP out,
+            p_file  TYPE string LOWER CASE,
+            p_anon  AS CHECKBOX,
+            p_aisrc AS CHECKBOX DEFAULT 'X',
+            p_lang  TYPE sylangu DEFAULT sy-langu.
 SELECTION-SCREEN END OF BLOCK b2.
 
 INITIALIZATION.
@@ -116,7 +126,20 @@ CLASS lcl_util DEFINITION FINAL.
                 iv_warn        TYPE i
                 iv_crit        TYPE i
       RETURNING VALUE(rv_html) TYPE string.
-    "! SAP documentation (DOCU_GET) as simple HTML, falls back to English
+    TYPES:
+      "! One paragraph of SAP documentation
+      BEGIN OF ty_docu_para,
+        text    TYPE string,
+        heading TYPE abap_bool,
+      END OF ty_docu_para,
+      tt_docu TYPE STANDARD TABLE OF ty_docu_para WITH EMPTY KEY.
+    "! SAP documentation (DOCU_GET) as plain paragraphs, falls back to English
+    CLASS-METHODS docu_paragraphs
+      IMPORTING iv_id           TYPE csequence
+                iv_object       TYPE csequence
+                iv_langu        TYPE sylangu
+      RETURNING VALUE(rt_paras) TYPE tt_docu.
+    "! SAP documentation as simple HTML: headings bold, paragraphs on own lines
     CLASS-METHODS docu_html
       IMPORTING iv_id          TYPE csequence
                 iv_object      TYPE csequence
@@ -182,13 +205,21 @@ CLASS lcl_util IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD docu_html.
-    " SAP documentation (DOCU_GET) as simple HTML: headings bold, paragraphs on own lines
+    DATA lt_html TYPE tt_string.
+    LOOP AT docu_paragraphs( iv_id = iv_id iv_object = iv_object iv_langu = iv_langu ) INTO DATA(ls_para).
+      APPEND COND string( WHEN ls_para-heading = abap_true THEN |<b>{ h( ls_para-text ) }</b>|
+                          ELSE h( ls_para-text ) ) TO lt_html.
+    ENDLOOP.
+    rv_html = concat_lines_of( table = lt_html sep = `<br>` ).
+  ENDMETHOD.
+
+  METHOD docu_paragraphs.
+    " SAPscript lines -> paragraphs: '=' and ' ' continue a paragraph, any other format starts one
     DATA lt_lines TYPE STANDARD TABLE OF tline.
     DATA lv_id TYPE dokhl-id.
     DATA lv_object TYPE dokhl-object.
     DATA lv_para TYPE string.
     DATA lv_text TYPE string.
-    DATA lt_html TYPE tt_string.
 
     lv_id = iv_id.
     lv_object = iv_object.
@@ -228,11 +259,11 @@ CLASS lcl_util IMPLEMENTATION.
         lv_para = |{ lv_para } { lv_text }|.
       ELSE.
         IF lv_para IS NOT INITIAL.
-          APPEND h( condense( lv_para ) ) TO lt_html.
+          APPEND VALUE #( text = condense( lv_para ) ) TO rt_paras.
         ENDIF.
         CLEAR lv_para.
         IF ls_line-tdformat CP 'U*'.
-          APPEND |<b>{ h( condense( lv_text ) ) }</b>| TO lt_html.
+          APPEND VALUE #( text = condense( lv_text ) heading = abap_true ) TO rt_paras.
         ELSEIF ls_line-tdformat CP 'B*' OR ls_line-tdformat CP 'N*'.
           lv_para = |- { lv_text }|.
         ELSE.
@@ -241,9 +272,103 @@ CLASS lcl_util IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
     IF lv_para IS NOT INITIAL.
-      APPEND h( condense( lv_para ) ) TO lt_html.
+      APPEND VALUE #( text = condense( lv_para ) ) TO rt_paras.
     ENDIF.
-    rv_html = concat_lines_of( table = lt_html sep = `<br>` ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* lcl_anonymizer - replaces user and server names for the AI export
+*   The export file leaves the SAP system (it is uploaded to a browser
+*   AI), so real names are replaced by USER_01, SERVER_01, ... The same
+*   name always gets the same alias, so the AI can still see that two
+*   problems hit the same user. scrub( ) also replaces the names where
+*   they appear inside free texts (e.g. system log messages).
+*----------------------------------------------------------------------*
+CLASS lcl_anonymizer DEFINITION FINAL.
+  PUBLIC SECTION.
+    "! @parameter iv_active | false = keep all names (anonymization switched off)
+    METHODS constructor
+      IMPORTING iv_active TYPE abap_bool.
+    "! Alias for a user name (USER_nn), or the name itself when switched off
+    METHODS user
+      IMPORTING iv_name        TYPE csequence
+      RETURNING VALUE(rv_name) TYPE string.
+    "! Alias for an application server / host name (SERVER_nn)
+    METHODS server
+      IMPORTING iv_name        TYPE csequence
+      RETURNING VALUE(rv_name) TYPE string.
+    "! Replace every known real name in free texts by its alias (whole words only)
+    METHODS scrub
+      CHANGING ct_lines TYPE lcl_util=>tt_string.
+    DATA mv_active TYPE abap_bool READ-ONLY.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF ty_alias,
+             real  TYPE string,
+             alias TYPE string,
+           END OF ty_alias,
+           tt_alias TYPE HASHED TABLE OF ty_alias WITH UNIQUE KEY real.
+    DATA mt_users TYPE tt_alias.
+    DATA mt_servers TYPE tt_alias.
+    METHODS alias
+      IMPORTING iv_name        TYPE csequence
+                iv_prefix      TYPE string
+      CHANGING  ct_aliases     TYPE tt_alias
+      RETURNING VALUE(rv_name) TYPE string.
+ENDCLASS.
+
+CLASS lcl_anonymizer IMPLEMENTATION.
+
+  METHOD constructor.
+    mv_active = iv_active.
+  ENDMETHOD.
+
+  METHOD user.
+    rv_name = alias( EXPORTING iv_name = iv_name iv_prefix = `USER` CHANGING ct_aliases = mt_users ).
+  ENDMETHOD.
+
+  METHOD server.
+    rv_name = alias( EXPORTING iv_name = iv_name iv_prefix = `SERVER` CHANGING ct_aliases = mt_servers ).
+  ENDMETHOD.
+
+  METHOD alias.
+    DATA lv_real TYPE string.
+    lv_real = iv_name.
+    CONDENSE lv_real.
+    IF mv_active = abap_false OR lv_real IS INITIAL.
+      rv_name = lv_real.
+      RETURN.
+    ENDIF.
+    READ TABLE ct_aliases INTO DATA(ls_alias) WITH TABLE KEY real = lv_real.
+    IF sy-subrc <> 0.
+      ls_alias = VALUE #( real = lv_real alias = |{ iv_prefix }_{ lines( ct_aliases ) + 1 WIDTH = 2 ALIGN = RIGHT PAD = '0' }| ).
+      INSERT ls_alias INTO TABLE ct_aliases.
+    ENDIF.
+    rv_name = ls_alias-alias.
+  ENDMETHOD.
+
+  METHOD scrub.
+    " longest names first, so 'DEVELOPER2' is replaced before 'DEVELOPER'
+    DATA lt_all TYPE STANDARD TABLE OF ty_alias WITH EMPTY KEY.
+    IF mv_active = abap_false.
+      RETURN.
+    ENDIF.
+    APPEND LINES OF mt_users TO lt_all.
+    APPEND LINES OF mt_servers TO lt_all.
+    SORT lt_all BY real DESCENDING.     " a name sorts after its own prefix
+    LOOP AT lt_all INTO DATA(ls_alias).
+      " Escape regex special characters in the name. Then replace it where it is not part of a longer
+      " name: no letter or digit directly before or after. '_' counts as a separator, because SAP
+      " joins host names with '_' (instance vhcalnplci_NPL_00, profile NPL_D00_vhcalnplci).
+      DATA(lv_pattern) = ls_alias-real.
+      REPLACE ALL OCCURRENCES OF REGEX `([\\.*+?^$()\[\]{}|])` IN lv_pattern WITH `\\$1`.
+      lv_pattern = |(^\|[^A-Za-z0-9]){ lv_pattern }(?=[^A-Za-z0-9]\|$)|.
+      LOOP AT ct_lines ASSIGNING FIELD-SYMBOL(<lv_line>).
+        REPLACE ALL OCCURRENCES OF REGEX lv_pattern IN <lv_line> WITH |$1{ ls_alias-alias }|.
+      ENDLOOP.
+    ENDLOOP.
   ENDMETHOD.
 
 ENDCLASS.
@@ -264,6 +389,11 @@ INTERFACE lif_section.
     RETURNING VALUE(rv_html) TYPE string.
   "! Plain list for background runs (spool)
   METHODS write_list.
+  "! The collected facts as Markdown, for the AI export (no ready-made explanations,
+  "! the AI writes those itself). Names go through io_anon.
+  METHODS get_ai_text
+    IMPORTING io_anon         TYPE REF TO lcl_anonymizer
+    RETURNING VALUE(rt_lines) TYPE lcl_util=>tt_string.
 ENDINTERFACE.
 
 " ABAP Unit test classes (end of the program) may look into the private parts
@@ -799,6 +929,74 @@ CLASS lcl_syslog IMPLEMENTATION.
     ENDLOOP.
   ENDMETHOD.
 
+  METHOD lif_section~get_ai_text.
+    " facts per message ID as Markdown, with SAP's own documentation of the message
+    DATA lt_names TYPE lcl_util=>tt_string.
+
+    APPEND `## 2. System log (SM21)` TO rt_lines.
+    APPEND `` TO rt_lines.
+    IF mv_error IS NOT INITIAL.
+      APPEND |Not available: { mv_error }| TO rt_lines.
+      RETURN.
+    ENDIF.
+    IF mt_groups IS INITIAL.
+      APPEND `No warnings or errors in the system log for this period.` TO rt_lines.
+      RETURN.
+    ENDIF.
+    DATA(lv_info) = COND string( WHEN mv_include_info = abap_true THEN `Information messages are included.`
+                                 ELSE `Information messages (SM21 priority W) were left out.` ).
+    APPEND |{ mv_entries } entries of { lines( mt_groups ) } message types, grouped by message ID. { lv_info } | &&
+           |Follow-up lines ('> ...') are listed as details of the entry they belong to.| TO rt_lines.
+
+    LOOP AT mt_groups INTO DATA(ls_group).
+      APPEND `` TO rt_lines.
+      APPEND |### Message { ls_group-msgid } ({ ls_group-count } time(s))| TO rt_lines.
+      DATA(lv_prio) = SWITCH string( ls_group-prio WHEN 'R' THEN `very high (red)` WHEN 'Y' THEN `high (yellow)`
+                                                   WHEN 'G' THEN `warning (green)` ELSE `information` ).
+      APPEND |- SM21 priority: { lv_prio }| TO rt_lines.
+      LOOP AT ls_group-examples INTO DATA(lv_text).
+        APPEND |- Message text: { lv_text }| TO rt_lines.
+      ENDLOOP.
+      LOOP AT ls_group-details INTO lv_text.
+        APPEND |- Detail line: { lv_text }| TO rt_lines.
+      ENDLOOP.
+      LOOP AT ls_group-os_errors INTO lv_text.
+        APPEND |- Operating system error: { lv_text }| TO rt_lines.
+      ENDLOOP.
+      DATA(lv_cancel) = cancel_message( ls_group ).
+      IF lv_cancel IS NOT INITIAL.
+        APPEND |- Text of the cancel message: { lv_cancel }| TO rt_lines.
+      ENDIF.
+      APPEND |- First / last: { ls_group-first_seen } / { ls_group-last_seen }| TO rt_lines.
+      CLEAR lt_names.
+      LOOP AT ls_group-users INTO DATA(lv_user).
+        APPEND io_anon->user( lv_user ) TO lt_names.
+      ENDLOOP.
+      IF lt_names IS NOT INITIAL.
+        APPEND |- User(s): { concat_lines_of( table = lt_names sep = `, ` ) }| TO rt_lines.
+      ENDIF.
+      IF ls_group-tcodes IS NOT INITIAL.
+        APPEND |- Transaction(s): { concat_lines_of( table = ls_group-tcodes sep = `, ` ) }| TO rt_lines.
+      ENDIF.
+      IF ls_group-programs IS NOT INITIAL.
+        APPEND |- Program(s): { concat_lines_of( table = ls_group-programs sep = `, ` ) }| TO rt_lines.
+      ENDIF.
+      IF ls_group-clients IS NOT INITIAL.
+        APPEND |- Client(s): { concat_lines_of( table = ls_group-clients sep = `, ` ) }| TO rt_lines.
+      ENDIF.
+      APPEND |- Rule-based pre-classification by the program (may be wrong): { ls_group-advice-category }, | &&
+             |severity { ls_group-severity }| TO rt_lines.
+      DATA(lt_docu) = lcl_util=>docu_paragraphs( iv_id = 'SL' iv_object = ls_group-msgid iv_langu = mv_langu ).
+      IF lt_docu IS NOT INITIAL.
+        APPEND `- SAP documentation of this message:` TO rt_lines.
+        LOOP AT lt_docu INTO DATA(ls_para).
+          APPEND COND string( WHEN ls_para-heading = abap_true THEN |  > **{ ls_para-text }**|
+                              ELSE |  > { ls_para-text }| ) TO rt_lines.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
   METHOD lif_section~write_list.
     DATA lv_text TYPE string.
     WRITE / `System log (SM21)`.
@@ -1317,6 +1515,57 @@ CLASS lcl_dbcheck IMPLEMENTATION.
     APPEND `</table>` TO rt_html.
   ENDMETHOD.
 
+  METHOD lif_section~get_ai_text.
+    " database figures and rule-based findings as Markdown tables / lists
+    DATA lv_backup TYPE string.
+    DATA lv_date TYPE d.
+
+    APPEND `## 3. Database (SAP ASE / Sybase)` TO rt_lines.
+    APPEND `` TO rt_lines.
+    IF mv_error IS NOT INITIAL.
+      APPEND |Not available: { mv_error }| TO rt_lines.
+      RETURN.
+    ENDIF.
+    APPEND |SAP database: { mv_sapdb }. Sizes in MB; "used" = share of the space that is in use. | &&
+           |"Log: shared" = the transaction log is on the same device as the data.| TO rt_lines.
+    APPEND `` TO rt_lines.
+    APPEND `| Database | Data MB | Data used | Log MB | Log used | Last log backup |` TO rt_lines.
+    APPEND `| --- | ---: | ---: | ---: | ---: | --- |` TO rt_lines.   " spaces: spool lists turn '|-' into lines
+    LOOP AT mt_db INTO DATA(ls_db).
+      IF ls_db-trunc = 1.
+        lv_backup = `cleared automatically (trunc log on chkpt)`.
+      ELSEIF ls_db-dump_date IS INITIAL OR ls_db-dump_date CN '0123456789'.
+        lv_backup = `never`.
+      ELSE.
+        lv_date = ls_db-dump_date.
+        lv_backup = |{ lv_date DATE = ISO }|.
+      ENDIF.
+      DATA(lv_log) = COND string( WHEN ls_db-mixed = 1 THEN `shared | shared`
+                                  ELSE |{ ls_db-log_mb } \| { pct( iv_total = ls_db-log_mb iv_free = ls_db-log_free ) }%| ).
+      APPEND |\| { ls_db-name }{ COND string( WHEN ls_db-offline = 1 THEN ` (OFFLINE)` ) } \| { ls_db-data_mb } \| | &&
+             |{ pct( iv_total = ls_db-data_mb iv_free = ls_db-data_free ) }% \| { lv_log } \| { lv_backup } \||
+             TO rt_lines.
+    ENDLOOP.
+
+    APPEND `` TO rt_lines.
+    APPEND `Findings of the program's rules (thresholds: data 85%/95%, log 70%/90%):` TO rt_lines.
+    IF mt_findings IS INITIAL.
+      APPEND `- none` TO rt_lines.
+    ENDIF.
+    LOOP AT mt_findings INTO DATA(ls_finding).
+      APPEND |- [{ ls_finding-severity }] { ls_finding-title }| TO rt_lines.
+    ENDLOOP.
+
+    APPEND `` TO rt_lines.
+    APPEND |Largest tables in { mv_sapdb } (from database statistics, approximate):| TO rt_lines.
+    APPEND `` TO rt_lines.
+    APPEND `| Table | Rows | Size MB with indexes |` TO rt_lines.
+    APPEND `| --- | ---: | ---: |` TO rt_lines.
+    LOOP AT mt_tables INTO DATA(ls_table).
+      APPEND |\| { ls_table-name } \| { ls_table-rows } \| { ls_table-total_mb } \|| TO rt_lines.
+    ENDLOOP.
+  ENDMETHOD.
+
   METHOD lif_section~write_list.
     DATA lv_text TYPE string.
     WRITE / `Database (DB02)`.
@@ -1444,14 +1693,16 @@ CLASS lcl_dump_section DEFINITION FINAL FRIENDS ltc_dump_section.
     "! @parameter it_hosts | application servers (empty = all)
     "! @parameter iv_own_only | only dumps in own code (Z/Y/namespace)
     "! @parameter iv_langu | language for SAP texts
+    "! @parameter iv_with_source | AI export: include the source lines around the failing line
     METHODS constructor
-      IMPORTING it_dates    TYPE tt_date_range OPTIONAL
-                it_users    TYPE tt_user_range OPTIONAL
-                it_errids   TYPE tt_errid_range OPTIONAL
-                it_clients  TYPE tt_client_range OPTIONAL
-                it_hosts    TYPE tt_host_range OPTIONAL
-                iv_own_only TYPE abap_bool DEFAULT abap_false
-                iv_langu    TYPE sylangu DEFAULT sy-langu.
+      IMPORTING it_dates       TYPE tt_date_range OPTIONAL
+                it_users       TYPE tt_user_range OPTIONAL
+                it_errids      TYPE tt_errid_range OPTIONAL
+                it_clients     TYPE tt_client_range OPTIONAL
+                it_hosts       TYPE tt_host_range OPTIONAL
+                iv_own_only    TYPE abap_bool DEFAULT abap_false
+                iv_langu       TYPE sylangu DEFAULT sy-langu
+                iv_with_source TYPE abap_bool DEFAULT abap_true.
     "! Were any problems found (for the ALV output)?
     METHODS has_problems
       RETURNING VALUE(rv_yes) TYPE abap_bool.
@@ -1486,6 +1737,7 @@ CLASS lcl_dump_section DEFINITION FINAL FRIENDS ltc_dump_section.
     DATA mt_hosts TYPE tt_host_range.
     DATA mv_own_only TYPE abap_bool.
     DATA mv_langu TYPE sylangu.
+    DATA mv_with_source TYPE abap_bool.
 
     " data
     DATA mt_dumps TYPE tt_dump.
@@ -1545,6 +1797,11 @@ CLASS lcl_dump_section DEFINITION FINAL FRIENDS ltc_dump_section.
       IMPORTING is_group       TYPE ty_group
                 is_advice      TYPE ty_advice
       RETURNING VALUE(rv_text) TYPE string.
+    "! Source lines around the failing line as plain text: '    14 >> code' marks the failing line
+    METHODS source_lines
+      IMPORTING iv_include      TYPE string
+                iv_line         TYPE i
+      RETURNING VALUE(rt_lines) TYPE tt_string.
     "! Source lines around the failing line as HTML (failing line highlighted)
     METHODS source_snippet
       IMPORTING iv_include     TYPE string
@@ -1577,6 +1834,7 @@ CLASS lcl_dump_section IMPLEMENTATION.
     mt_hosts    = it_hosts.
     mv_own_only = iv_own_only.
     mv_langu    = iv_langu.
+    mv_with_source = iv_with_source.
   ENDMETHOD.
 
   METHOD lif_section~analyze.
@@ -1586,6 +1844,77 @@ CLASS lcl_dump_section IMPLEMENTATION.
     ENDIF.
     build_groups( ).
     prefetch( ).
+  ENDMETHOD.
+
+  METHOD lif_section~get_ai_text.
+    " facts per problem as Markdown - the AI writes the explanations itself
+    DATA lt_names TYPE tt_string.
+
+    APPEND `## 1. Short dumps (ST22)` TO rt_lines.
+    APPEND `` TO rt_lines.
+    IF mt_groups IS INITIAL.
+      APPEND `No short dumps in this period.` TO rt_lines.
+      RETURN.
+    ENDIF.
+    count_totals( IMPORTING ev_dumps = DATA(lv_dumps) ).
+    APPEND |{ lv_dumps } short dumps, grouped into { lines( mt_groups ) } problems. Identical dumps (same runtime | &&
+           |error, program, include and line) are one problem with a count. Problems are sorted by the | &&
+           |program's own rule-based rating, worst first.| TO rt_lines.
+
+    LOOP AT mt_groups INTO DATA(ls_g).
+      APPEND `` TO rt_lines.
+      APPEND |### Problem { ls_g-rank }: { ls_g-errid }| TO rt_lines.
+      APPEND |- Runtime error: { ls_g-errid }| TO rt_lines.
+      DATA(lv_short) = sap_short_text( ls_g-errid ).
+      IF lv_short IS NOT INITIAL.
+        APPEND |- SAP short text: { lv_short }| TO rt_lines.
+      ENDIF.
+      IF ls_g-exc_class IS NOT INITIAL.
+        APPEND |- Exception class: { ls_g-exc_class } ({ exception_text( ls_g-exc_class ) })| TO rt_lines.
+      ENDIF.
+      APPEND |- Program / include / line: { ls_g-program } / { ls_g-include } / { ls_g-line }| TO rt_lines.
+      APPEND |- Own code (Z/Y/namespace): { COND string( WHEN ls_g-own_code = abap_true THEN `yes` ELSE `no, SAP standard` ) }|
+             TO rt_lines.
+      READ TABLE mt_trdir INTO DATA(ls_dir) WITH TABLE KEY name = CONV trdir-name( ls_g-include ).
+      IF sy-subrc = 0.
+        APPEND |- Include last changed: { ls_dir-udat DATE = ISO } by { io_anon->user( ls_dir-unam ) }| TO rt_lines.
+      ENDIF.
+
+      " users and servers come as joined lists ('A, B, + 3 more') - map every name
+      CLEAR lt_names.
+      SPLIT ls_g-user_list AT `, ` INTO TABLE DATA(lt_users).
+      LOOP AT lt_users INTO DATA(lv_user).
+        APPEND COND string( WHEN lv_user CP '+*' THEN lv_user ELSE io_anon->user( lv_user ) ) TO lt_names.
+      ENDLOOP.
+      APPEND |- Occurrences: { ls_g-count }, by { ls_g-users } user(s): { concat_lines_of( table = lt_names sep = `, ` ) }|
+             TO rt_lines.
+      CLEAR lt_names.
+      SPLIT ls_g-hosts AT `, ` INTO TABLE DATA(lt_hosts).
+      LOOP AT lt_hosts INTO DATA(lv_host).
+        APPEND io_anon->server( lv_host ) TO lt_names.
+      ENDLOOP.
+      APPEND |- Client(s): { ls_g-clients }; application server(s): { concat_lines_of( table = lt_names sep = `, ` ) }|
+             TO rt_lines.
+      APPEND |- First / last occurrence: { ls_g-first_seen } / { ls_g-last_seen }; per day: { ls_g-day_list }| TO rt_lines.
+      status_info( EXPORTING is_group = ls_g IMPORTING ev_text = DATA(lv_status) ).
+      APPEND |- Status: { lv_status }| TO rt_lines.
+      APPEND |- Rule-based pre-classification by the program (may be wrong): { ls_g-category }, | &&
+             |severity { ls_g-severity }| TO rt_lines.
+      DATA(lv_expl) = sap_explanation( ls_g ).
+      IF lv_expl IS NOT INITIAL.
+        APPEND |- SAP's explanation ("What happened?"): { lv_expl }| TO rt_lines.
+      ENDIF.
+
+      IF mv_with_source = abap_true.
+        DATA(lt_src) = source_lines( iv_include = ls_g-include iv_line = ls_g-line ).
+        IF lt_src IS NOT INITIAL.
+          APPEND `- Source code around the failing line (">>" marks the line where it stopped):` TO rt_lines.
+          APPEND |```abap| TO rt_lines.
+          APPEND LINES OF lt_src TO rt_lines.
+          APPEND |```| TO rt_lines.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
   ENDMETHOD.
 
   METHOD has_problems.
@@ -2366,9 +2695,11 @@ CLASS lcl_dump_section IMPLEMENTATION.
               |Full details: transaction ST22, runtime error { is_group-errid }, { is_group-last_seen }.|.
   ENDMETHOD.
 
-  METHOD source_snippet.
+  METHOD source_lines.
+    " 4 lines before and 2 after the failing line, each with its line number
     DATA lt_src TYPE STANDARD TABLE OF char255 WITH EMPTY KEY.
     DATA lv_prog TYPE progname.
+    DATA lv_idx TYPE i.
     IF iv_include IS INITIAL OR iv_line <= 0.
       RETURN.
     ENDIF.
@@ -2377,20 +2708,29 @@ CLASS lcl_dump_section IMPLEMENTATION.
     IF sy-subrc <> 0 OR lt_src IS INITIAL.
       RETURN.
     ENDIF.
-    DATA(lv_from) = nmax( val1 = 1 val2 = iv_line - 4 ).
-    DATA(lv_to)   = nmin( val1 = lines( lt_src ) val2 = iv_line + 2 ).
-    APPEND `<pre class="code">` TO rt_html.
-    DATA lv_idx TYPE i.
-    lv_idx = lv_from.
+    DATA(lv_to) = nmin( val1 = lines( lt_src ) val2 = iv_line + 2 ).
+    lv_idx = nmax( val1 = 1 val2 = iv_line - 4 ).
     WHILE lv_idx <= lv_to.
-      DATA(lv_code) = h( lt_src[ lv_idx ] ).
-      IF lv_idx = iv_line.
-        APPEND |<span class="hit">{ lv_idx WIDTH = 6 ALIGN = RIGHT } &gt;&gt; { lv_code }</span>| TO rt_html.
-      ELSE.
-        APPEND |{ lv_idx WIDTH = 6 ALIGN = RIGHT }    { lv_code }| TO rt_html.
-      ENDIF.
+      APPEND |{ lv_idx WIDTH = 6 ALIGN = RIGHT } { COND string( WHEN lv_idx = iv_line THEN `>>` ELSE `  ` ) } | &&
+             |{ lt_src[ lv_idx ] }| TO rt_lines.
       lv_idx = lv_idx + 1.
     ENDWHILE.
+  ENDMETHOD.
+
+  METHOD source_snippet.
+    DATA(lt_lines) = source_lines( iv_include = iv_include iv_line = iv_line ).
+    IF lt_lines IS INITIAL.
+      RETURN.
+    ENDIF.
+    APPEND `<pre class="code">` TO rt_html.
+    LOOP AT lt_lines INTO DATA(lv_line).
+      " the marker '>>' is in columns 8-9 (after the 6-digit line number and a blank)
+      IF strlen( lv_line ) >= 9 AND substring( val = lv_line off = 7 len = 2 ) = `>>`.
+        APPEND |<span class="hit">{ h( lv_line ) }</span>| TO rt_html.
+      ELSE.
+        APPEND h( lv_line ) TO rt_html.
+      ENDIF.
+    ENDLOOP.
     APPEND `</pre>` TO rt_html.
   ENDMETHOD.
 
@@ -2560,6 +2900,12 @@ CLASS lcl_report DEFINITION FINAL.
       RETURNING VALUE(rt_html) TYPE lcl_util=>tt_string.
     "! Plain list for background runs (spool)
     METHODS write_list.
+    "! AI export: all sections as one Markdown text, names anonymized
+    METHODS build_ai_text
+      RETURNING VALUE(rt_lines) TYPE lcl_util=>tt_string.
+    "! Save the AI export on the PC (asks for the file name if none is given)
+    METHODS save_ai_file
+      IMPORTING it_lines TYPE lcl_util=>tt_string.
 ENDCLASS.
 
 CLASS lcl_report IMPLEMENTATION.
@@ -2576,7 +2922,20 @@ CLASS lcl_report IMPLEMENTATION.
     ENDLOOP.
 
     IF sy-batch = abap_true.
-      write_list( ).
+      IF p_ai = abap_true.
+        " background job: the AI export goes to the spool (download it from SP01 / SM37)
+        LOOP AT build_ai_text( ) INTO DATA(lv_line).
+          WRITE / lv_line.
+        ENDLOOP.
+      ELSE.
+        write_list( ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    " AI export: a file to upload into a browser AI instead of the HTML report
+    IF p_ai = abap_true.
+      save_ai_file( build_ai_text( ) ).
       RETURN.
     ENDIF.
 
@@ -2629,7 +2988,8 @@ CLASS lcl_report IMPLEMENTATION.
                         it_clients  = s_mandt[]
                         it_hosts    = s_ahost[]
                         iv_own_only = p_cust
-                        iv_langu    = p_lang ).
+                        iv_langu    = p_lang
+                        iv_with_source = p_aisrc ).
       APPEND mo_dumps TO mt_sections.
     ENDIF.
     IF p_slog = abap_true.
@@ -2642,6 +3002,73 @@ CLASS lcl_report IMPLEMENTATION.
     ENDIF.
     IF p_db = abap_true.
       APPEND NEW lcl_dbcheck( ) TO mt_sections.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD build_ai_text.
+    " Header with the context an AI needs (release, database, period), then every section.
+    " Finally all known user / server names are replaced in free texts as well.
+    DATA(lo_anon) = NEW lcl_anonymizer( p_anon ).
+    " register our own names first, so they are found inside message texts, too
+    lo_anon->user( sy-uname ).
+    lo_anon->server( sy-host ).
+    lo_anon->server( cl_abap_syst=>get_instance_name( ) ).
+
+    APPEND `# SAP problem data for AI analysis` TO rt_lines.
+    APPEND `` TO rt_lines.
+    APPEND |- Created by program ZDUMP_EXPLAINER on { sy-datum DATE = ISO } { sy-uzeit TIME = ISO }| TO rt_lines.
+    APPEND |- System: { sy-sysid }, SAP release { sy-saprl }, database { sy-dbsys }, operating system { sy-opsys }|
+           TO rt_lines.
+    APPEND |- Period analysed: { mv_from DATE = ISO } to { mv_to DATE = ISO }| TO rt_lines.
+    DATA(lv_anon) = COND string( WHEN p_anon = abap_true THEN `yes - user names are USER_nn, server names SERVER_nn`
+                                 ELSE `no` ).
+    APPEND |- Anonymized: { lv_anon }| TO rt_lines.
+    APPEND `- Content: facts only. Everything marked "rule-based pre-classification" comes from simple ` &&
+           `rules in the program and may be wrong.` TO rt_lines.
+
+    LOOP AT mt_sections INTO DATA(lo_section).
+      APPEND `` TO rt_lines.
+      APPEND LINES OF lo_section->get_ai_text( lo_anon ) TO rt_lines.
+    ENDLOOP.
+
+    lo_anon->scrub( CHANGING ct_lines = rt_lines ).
+  ENDMETHOD.
+
+  METHOD save_ai_file.
+    DATA lv_file TYPE string.
+    DATA lv_path TYPE string.
+    DATA lv_full TYPE string.
+    DATA lv_action TYPE i.
+    DATA(lt_lines) = it_lines.     " gui_download wants a changeable table
+
+    lv_full = p_file.
+    IF lv_full IS INITIAL.
+      cl_gui_frontend_services=>file_save_dialog(
+        EXPORTING  window_title      = 'Save SAP problem data for the AI'
+                   default_extension = 'md'
+                   default_file_name = |SAP_problems_{ sy-sysid }_{ sy-datum }.md|
+                   file_filter       = |Markdown (*.md)\|*.md\|Text (*.txt)\|*.txt|
+        CHANGING   filename          = lv_file
+                   path              = lv_path
+                   fullpath          = lv_full
+                   user_action       = lv_action
+        EXCEPTIONS OTHERS            = 1 ).
+      IF sy-subrc <> 0 OR lv_action <> cl_gui_frontend_services=>action_ok.
+        MESSAGE 'AI export cancelled.' TYPE 'S'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    cl_gui_frontend_services=>gui_download(
+      EXPORTING  filename = lv_full
+                 filetype = 'ASC'
+                 codepage = '4110'          " UTF-8
+      CHANGING   data_tab = lt_lines
+      EXCEPTIONS OTHERS   = 1 ).
+    IF sy-subrc = 0.
+      MESSAGE |AI export saved to { lv_full } - upload it together with the prompt from AI_REPORT_PROMPT.md| TYPE 'S'.
+    ELSE.
+      MESSAGE |Could not save { lv_full }| TYPE 'S' DISPLAY LIKE 'E'.
     ENDIF.
   ENDMETHOD.
 
@@ -2777,6 +3204,48 @@ CLASS ltc_util IMPLEMENTATION.
     cl_abap_unit_assert=>assert_char_cp( act = lcl_util=>bar( iv_pct = 10 iv_warn = 85 iv_crit = 95 ) exp = '*good*' ).
     cl_abap_unit_assert=>assert_char_cp( act = lcl_util=>bar( iv_pct = 150 iv_warn = 85 iv_crit = 95 )
                                          exp = '*width:100%*' ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+CLASS ltc_anonymizer DEFINITION FINAL FOR TESTING RISK LEVEL HARMLESS DURATION SHORT.
+  PRIVATE SECTION.
+    METHODS same_name_same_alias FOR TESTING.
+    METHODS switched_off_keeps_names FOR TESTING.
+    METHODS scrub_replaces_whole_words FOR TESTING.
+ENDCLASS.
+
+CLASS ltc_anonymizer IMPLEMENTATION.
+
+  METHOD same_name_same_alias.
+    DATA(lo_cut) = NEW lcl_anonymizer( abap_true ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'ALICE' ) exp = `USER_01` ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'BOB' ) exp = `USER_02` ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'ALICE' ) exp = `USER_01` ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->server( 'host1_NPL_00' ) exp = `SERVER_01` ).
+  ENDMETHOD.
+
+  METHOD switched_off_keeps_names.
+    DATA(lo_cut) = NEW lcl_anonymizer( abap_false ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'ALICE' ) exp = `ALICE` ).
+  ENDMETHOD.
+
+  METHOD scrub_replaces_whole_words.
+    " names inside free texts are replaced - but not as part of other words
+    DATA(lo_cut) = NEW lcl_anonymizer( abap_true ).
+    lo_cut->user( 'DEVELOPER' ).
+    lo_cut->server( 'vhcalnplci_NPL_00' ).
+    lo_cut->server( 'vhcalnplci' ).
+    DATA(lt_lines) = VALUE lcl_util=>tt_string(
+      ( `Short dump "261106 220318 vhcalnplci_NPL_00 DEVELOPER" created` )
+      ( `Program ZDEVELOPERTOOLS` )
+      ( `Profile name = /usr/sap/NPL/SYS/profile/NPL_D00_vhcalnplci` ) ).
+    lo_cut->scrub( CHANGING ct_lines = lt_lines ).
+    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 1 ] exp = `Short dump "261106 220318 SERVER_01 USER_01" created` ).
+    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 2 ] exp = `Program ZDEVELOPERTOOLS`
+                                        msg = 'part of a longer name must stay' ).
+    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 3 ] exp = `Profile name = /usr/sap/NPL/SYS/profile/NPL_D00_SERVER_02` ).
   ENDMETHOD.
 
 ENDCLASS.
