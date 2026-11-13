@@ -33,18 +33,9 @@
 *&
 *& ABAP 7.50. Read-only: the program changes nothing in the system.
 *&
-*& Selection texts (SE38 -> Goto -> Text elements -> Selection texts):
-*&   P_DUMP  Short dumps (ST22)  P_SLOG  System log (SM21)
-*&   P_SLINF Include information messages        P_DB    Database (DB02)
-*&   S_DATUM Date        S_UNAME User         S_ERRID Runtime error
-*&   S_MANDT Client      S_AHOST App server   P_CUST  Only own code (Z/Y)
-*&   P_HTML  HTML report P_ALV   ALV overview (short dumps)
-*&   P_AI    AI export file (for a browser AI)
-*&   P_FILE  Save to file (HTML / AI export)
-*&   P_ANON  Anonymize users and servers         P_AISRC Include source code
-*&   P_LANG  Text language for SAP texts
-*& Text symbols: B01 'Period and filters', B02 'Output',
-*&               B03 'What to analyse'
+*& Screen texts: all titles, field labels and help lines of the selection
+*& screen are set in INITIALIZATION, so no text elements have to be
+*& maintained in SE38 - copying the source code is enough.
 *&---------------------------------------------------------------------*
 REPORT zdump_explainer LINE-SIZE 1023.     " wide spool list for the AI export in background
 
@@ -52,14 +43,18 @@ TABLES snap_beg.
 
 DATA gv_errid TYPE c LENGTH 40.
 
-SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
+" Block titles (t_...) and help lines (c_...) are screen fields that the
+" statements below create implicitly; their texts are set in INITIALIZATION.
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE t_what.
+SELECTION-SCREEN COMMENT /1(79) c_what.
 PARAMETERS: p_dump  AS CHECKBOX DEFAULT 'X',
             p_slog  AS CHECKBOX DEFAULT 'X',
             p_slinf AS CHECKBOX,
             p_db    AS CHECKBOX DEFAULT 'X'.
 SELECTION-SCREEN END OF BLOCK b3.
 
-SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE t_filt.
+SELECTION-SCREEN COMMENT /1(79) c_filt.
 SELECT-OPTIONS: s_datum FOR snap_beg-datum,
                 s_uname FOR snap_beg-uname,
                 s_errid FOR gv_errid,
@@ -68,15 +63,22 @@ SELECT-OPTIONS: s_datum FOR snap_beg-datum,
 PARAMETERS p_cust AS CHECKBOX.
 SELECTION-SCREEN END OF BLOCK b1.
 
-SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE t_out.
 PARAMETERS: p_html  RADIOBUTTON GROUP out DEFAULT 'X',
             p_alv   RADIOBUTTON GROUP out,
             p_ai    RADIOBUTTON GROUP out,
             p_file  TYPE string LOWER CASE,
-            p_anon  AS CHECKBOX,
-            p_aisrc AS CHECKBOX DEFAULT 'X',
             p_lang  TYPE sylangu DEFAULT sy-langu.
+SELECTION-SCREEN COMMENT /1(79) c_file.
+SELECTION-SCREEN COMMENT /1(79) c_ai1.
+SELECTION-SCREEN COMMENT /1(79) c_ai2.
 SELECTION-SCREEN END OF BLOCK b2.
+
+" AI export options - hidden for now (NO-DISPLAY keeps the defaults; they can still be set
+" with SUBMIT ... WITH, or shown again by removing NO-DISPLAY): source code lines included,
+" names not hidden.
+PARAMETERS: p_aisrc TYPE abap_bool DEFAULT abap_true NO-DISPLAY,
+            p_anon  TYPE abap_bool DEFAULT abap_false NO-DISPLAY.
 
 INITIALIZATION.
   s_datum-sign   = 'I'.
@@ -84,6 +86,67 @@ INITIALIZATION.
   s_datum-low    = sy-datum - 7.
   s_datum-high   = sy-datum.
   APPEND s_datum.
+
+  " block titles and help lines
+  t_what = 'What to analyse'.
+  c_what = 'Tick the areas the report should check.'.
+  t_filt = 'Period and filters'.
+  c_filt = 'Leave a filter empty to include everything.'.
+  t_out  = 'Output'.
+  c_file = 'Save to file: optional for HTML; for the AI export empty = save dialog'.
+  c_ai1  = 'AI export: a Markdown file to upload into a browser AI (Claude, ChatGPT, ...)'.
+  c_ai2  = 'together with the prompt in AI_REPORT_PROMPT.md.'.
+
+  " field labels (same as selection texts in SE38, max. 30 characters)
+  %_p_dump_%_app_%-text  = 'Short dumps (ST22)'.
+  %_p_slog_%_app_%-text  = 'System log (SM21)'.
+  %_p_slinf_%_app_%-text = 'Also SM21 information messages'.
+  %_p_db_%_app_%-text    = 'Database space (DB02)'.
+  %_s_datum_%_app_%-text = 'Period (date)'.
+  %_s_uname_%_app_%-text = 'User'.
+  %_s_errid_%_app_%-text = 'Runtime error (dumps)'.
+  %_s_mandt_%_app_%-text = 'Client'.
+  %_s_ahost_%_app_%-text = 'Application server (dumps)'.
+  %_p_cust_%_app_%-text  = 'Only own code (Z/Y) dumps'.
+  %_p_html_%_app_%-text  = 'HTML report'.
+  %_p_alv_%_app_%-text   = 'ALV list (short dumps only)'.
+  %_p_ai_%_app_%-text    = 'AI export file (Markdown)'.
+  %_p_file_%_app_%-text  = 'Save to file (full path)'.
+  %_p_lang_%_app_%-text  = 'Language of SAP texts'.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  " F4 on 'Save to file': Windows save dialog. The output choice on the screen is not yet
+  " transported to the program at F4 time, so it is read from the screen first.
+  DATA lt_dynp TYPE STANDARD TABLE OF dynpread.
+  DATA lv_f4_file TYPE string.
+  DATA lv_f4_path TYPE string.
+  DATA lv_f4_full TYPE string.
+  DATA lv_f4_action TYPE i.
+  lt_dynp = VALUE #( ( fieldname = 'P_AI' ) ).
+  CALL FUNCTION 'DYNP_VALUES_READ'
+    EXPORTING
+      dyname     = sy-repid
+      dynumb     = sy-dynnr
+    TABLES
+      dynpfields = lt_dynp
+    EXCEPTIONS
+      OTHERS     = 1.
+  DATA(lv_f4_ai) = xsdbool( sy-subrc = 0 AND VALUE #( lt_dynp[ 1 ]-fieldvalue OPTIONAL ) = 'X' ).
+  DATA(lv_f4_ext) = COND string( WHEN lv_f4_ai = abap_true THEN `md` ELSE `html` ).
+  cl_gui_frontend_services=>file_save_dialog(
+    EXPORTING  window_title      = 'Save to file'
+               default_extension = lv_f4_ext
+               default_file_name = |SAP_problems_{ sy-sysid }_{ sy-datum }.{ lv_f4_ext }|
+               file_filter       = COND string( WHEN lv_f4_ai = abap_true THEN `Markdown (*.md)|*.md|Text (*.txt)|*.txt`
+                                                ELSE `HTML (*.html)|*.html` )
+    CHANGING   filename          = lv_f4_file
+               path              = lv_f4_path
+               fullpath          = lv_f4_full
+               user_action       = lv_f4_action
+    EXCEPTIONS OTHERS            = 1 ).
+  IF sy-subrc = 0 AND lv_f4_action = cl_gui_frontend_services=>action_ok.
+    p_file = lv_f4_full.
+  ENDIF.
 
 *----------------------------------------------------------------------*
 * lcl_util - stateless helpers shared by all sections
@@ -350,7 +413,7 @@ CLASS lcl_anonymizer IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD scrub.
-    " longest names first, so 'DEVELOPER2' is replaced before 'DEVELOPER'
+    " longest names first, so 'JSMITH2' is replaced before 'JSMITH'
     DATA lt_all TYPE STANDARD TABLE OF ty_alias WITH EMPTY KEY.
     IF mv_active = abap_false.
       RETURN.
@@ -361,7 +424,7 @@ CLASS lcl_anonymizer IMPLEMENTATION.
     LOOP AT lt_all INTO DATA(ls_alias).
       " Escape regex special characters in the name. Then replace it where it is not part of a longer
       " name: no letter or digit directly before or after. '_' counts as a separator, because SAP
-      " joins host names with '_' (instance vhcalnplci_NPL_00, profile NPL_D00_vhcalnplci).
+      " joins host names with '_' (instance sapsrv01_ABC_00, profile ABC_D00_sapsrv01).
       DATA(lv_pattern) = ls_alias-real.
       REPLACE ALL OCCURRENCES OF REGEX `([\\.*+?^$()\[\]{}|])` IN lv_pattern WITH `\\$1`.
       lv_pattern = |(^\|[^A-Za-z0-9]){ lv_pattern }(?=[^A-Za-z0-9]\|$)|.
@@ -1750,7 +1813,7 @@ CLASS lcl_dump_section DEFINITION FINAL FRIENDS ltc_dump_section.
 
     "! Read dump headers of the period from SNAP_BEG and apply the filters
     METHODS read_dumps.
-    "! Split FLIST ('FC022COMPUTE_INT...AP010ZDUMP_TEST...') into its fields
+    "! Split FLIST ('FC022COMPUTE_INT...AP010ZSALES_RPT...') into its fields
     METHODS parse_flist
       IMPORTING iv_flist   TYPE csequence
       CHANGING  cs_dump    TYPE ty_dump.
@@ -3223,7 +3286,7 @@ CLASS ltc_anonymizer IMPLEMENTATION.
     cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'ALICE' ) exp = `USER_01` ).
     cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'BOB' ) exp = `USER_02` ).
     cl_abap_unit_assert=>assert_equals( act = lo_cut->user( 'ALICE' ) exp = `USER_01` ).
-    cl_abap_unit_assert=>assert_equals( act = lo_cut->server( 'host1_NPL_00' ) exp = `SERVER_01` ).
+    cl_abap_unit_assert=>assert_equals( act = lo_cut->server( 'sapsrv01_ABC_00' ) exp = `SERVER_01` ).
   ENDMETHOD.
 
   METHOD switched_off_keeps_names.
@@ -3234,18 +3297,18 @@ CLASS ltc_anonymizer IMPLEMENTATION.
   METHOD scrub_replaces_whole_words.
     " names inside free texts are replaced - but not as part of other words
     DATA(lo_cut) = NEW lcl_anonymizer( abap_true ).
-    lo_cut->user( 'DEVELOPER' ).
-    lo_cut->server( 'vhcalnplci_NPL_00' ).
-    lo_cut->server( 'vhcalnplci' ).
+    lo_cut->user( 'JSMITH' ).
+    lo_cut->server( 'sapsrv01_ABC_00' ).
+    lo_cut->server( 'sapsrv01' ).
     DATA(lt_lines) = VALUE lcl_util=>tt_string(
-      ( `Short dump "261106 220318 vhcalnplci_NPL_00 DEVELOPER" created` )
-      ( `Program ZDEVELOPERTOOLS` )
-      ( `Profile name = /usr/sap/NPL/SYS/profile/NPL_D00_vhcalnplci` ) ).
+      ( `Short dump "261106 220318 sapsrv01_ABC_00 JSMITH" created` )
+      ( `Program ZJSMITHTOOLS` )
+      ( `Profile name = /usr/sap/ABC/SYS/profile/ABC_D00_sapsrv01` ) ).
     lo_cut->scrub( CHANGING ct_lines = lt_lines ).
     cl_abap_unit_assert=>assert_equals( act = lt_lines[ 1 ] exp = `Short dump "261106 220318 SERVER_01 USER_01" created` ).
-    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 2 ] exp = `Program ZDEVELOPERTOOLS`
+    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 2 ] exp = `Program ZJSMITHTOOLS`
                                         msg = 'part of a longer name must stay' ).
-    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 3 ] exp = `Profile name = /usr/sap/NPL/SYS/profile/NPL_D00_SERVER_02` ).
+    cl_abap_unit_assert=>assert_equals( act = lt_lines[ 3 ] exp = `Profile name = /usr/sap/ABC/SYS/profile/ABC_D00_SERVER_02` ).
   ENDMETHOD.
 
 ENDCLASS.
@@ -3259,7 +3322,7 @@ CLASS ltc_dump_section DEFINITION FINAL FOR TESTING RISK LEVEL HARMLESS DURATION
     METHODS dump
       IMPORTING iv_errid       TYPE string
                 iv_line        TYPE i
-                iv_user        TYPE syuname DEFAULT 'DEVELOPER'
+                iv_user        TYPE syuname DEFAULT 'JSMITH'
       RETURNING VALUE(rs_dump) TYPE lcl_dump_section=>ty_dump.
     METHODS parse_flist_real_dump FOR TESTING.
     METHODS parse_flist_garbage FOR TESTING.
@@ -3281,14 +3344,14 @@ CLASS ltc_dump_section IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD parse_flist_real_dump.
-    " FLIST of a real dump of ZDUMP_TEST (taken from SNAP_BEG)
+    " FLIST in the format of SNAP_BEG (division by zero in program ZSALES_RPT)
     DATA ls_dump TYPE lcl_dump_section=>ty_dump.
     mo_cut->parse_flist(
-      EXPORTING iv_flist = `FC022COMPUTE_INT_ZERODIVIDEAP010ZDUMP_TESTAI010ZDUMP_TESTAL00214XC016CX_SY_ZERODIVIDE`
+      EXPORTING iv_flist = `FC022COMPUTE_INT_ZERODIVIDEAP010ZSALES_RPTAI010ZSALES_RPTAL00214XC016CX_SY_ZERODIVIDE`
       CHANGING  cs_dump  = ls_dump ).
     cl_abap_unit_assert=>assert_equals( act = ls_dump-errid     exp = `COMPUTE_INT_ZERODIVIDE` ).
-    cl_abap_unit_assert=>assert_equals( act = ls_dump-program   exp = `ZDUMP_TEST` ).
-    cl_abap_unit_assert=>assert_equals( act = ls_dump-include   exp = `ZDUMP_TEST` ).
+    cl_abap_unit_assert=>assert_equals( act = ls_dump-program   exp = `ZSALES_RPT` ).
+    cl_abap_unit_assert=>assert_equals( act = ls_dump-include   exp = `ZSALES_RPT` ).
     cl_abap_unit_assert=>assert_equals( act = ls_dump-line      exp = 14 ).
     cl_abap_unit_assert=>assert_equals( act = ls_dump-exc_class exp = `CX_SY_ZERODIVIDE` ).
   ENDMETHOD.
@@ -3301,7 +3364,7 @@ CLASS ltc_dump_section IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD own_code.
-    cl_abap_unit_assert=>assert_true( act = mo_cut->is_own_code( `ZDUMP_TEST` ) ).
+    cl_abap_unit_assert=>assert_true( act = mo_cut->is_own_code( `ZSALES_RPT` ) ).
     cl_abap_unit_assert=>assert_true( act = mo_cut->is_own_code( `SAPLZFG` ) ).
     cl_abap_unit_assert=>assert_true( act = mo_cut->is_own_code( `/ABC/CL_X` ) ).
     cl_abap_unit_assert=>assert_false( act = mo_cut->is_own_code( `SAPMV45A` ) ).
@@ -3357,7 +3420,7 @@ CLASS ltc_syslog DEFINITION FINAL FOR TESTING RISK LEVEL HARMLESS DURATION SHORT
                 iv_msgid        TYPE rslgno
                 iv_prio         TYPE rslgnkkd
                 iv_text         TYPE string
-                iv_user         TYPE syuname DEFAULT 'DEVELOPER'
+                iv_user         TYPE syuname DEFAULT 'JSMITH'
       RETURNING VALUE(rs_entry) TYPE rslgentry.
     "! group of a message ID after process_entries (initial if there is none)
     METHODS group
@@ -3377,7 +3440,7 @@ CLASS ltc_syslog IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD entry.
-    rs_entry = VALUE #( zdate = sy-datum ztime = '120000' instance = 'host_NPL_00' processid = iv_proc
+    rs_entry = VALUE #( zdate = sy-datum ztime = '120000' instance = 'sapsrv01_ABC_00' processid = iv_proc
                         messageid = iv_msgid monbew = iv_prio text = iv_text zuser = iv_user client = '001' ).
   ENDMETHOD.
 
@@ -3452,11 +3515,11 @@ CLASS ltc_dbcheck IMPLEMENTATION.
 
   METHOD setup.
     mo_cut = NEW #( ).
-    mo_cut->mv_sapdb = `NPL`.
+    mo_cut->mv_sapdb = `ABC`.
   ENDMETHOD.
 
   METHOD data_92_pct_is_medium.
-    mo_cut->mt_db = VALUE #( ( name = 'NPL' data_mb = 1000 data_free = 80 log_mb = 100 log_free = 90 trunc = 1 ) ).
+    mo_cut->mt_db = VALUE #( ( name = 'ABC' data_mb = 1000 data_free = 80 log_mb = 100 log_free = 90 trunc = 1 ) ).
     mo_cut->evaluate( ).
     " findings: data space (Medium) + automatic log truncation (Low), worst first
     cl_abap_unit_assert=>assert_equals( act = lines( mo_cut->mt_findings ) exp = 2 ).
@@ -3465,14 +3528,14 @@ CLASS ltc_dbcheck IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD data_96_pct_is_high.
-    mo_cut->mt_db = VALUE #( ( name = 'NPL' data_mb = 1000 data_free = 40 log_mb = 100 log_free = 90 trunc = 1 ) ).
+    mo_cut->mt_db = VALUE #( ( name = 'ABC' data_mb = 1000 data_free = 40 log_mb = 100 log_free = 90 trunc = 1 ) ).
     mo_cut->evaluate( ).
     cl_abap_unit_assert=>assert_equals( act = mo_cut->mt_findings[ 1 ]-severity exp = `High` ).
   ENDMETHOD.
 
   METHOD full_log_is_high.
     " log backup today -> only the full log is a finding
-    mo_cut->mt_db = VALUE #( ( name = 'NPL' data_mb = 1000 data_free = 900 log_mb = 100 log_free = 5
+    mo_cut->mt_db = VALUE #( ( name = 'ABC' data_mb = 1000 data_free = 900 log_mb = 100 log_free = 5
                                dump_date = sy-datum ) ).
     mo_cut->evaluate( ).
     cl_abap_unit_assert=>assert_equals( act = lines( mo_cut->mt_findings ) exp = 1 ).
@@ -3481,7 +3544,7 @@ CLASS ltc_dbcheck IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD log_never_backed_up.
-    mo_cut->mt_db = VALUE #( ( name = 'NPL' data_mb = 1000 data_free = 900 log_mb = 100 log_free = 90 ) ).
+    mo_cut->mt_db = VALUE #( ( name = 'ABC' data_mb = 1000 data_free = 900 log_mb = 100 log_free = 90 ) ).
     mo_cut->evaluate( ).
     cl_abap_unit_assert=>assert_equals( act = lines( mo_cut->mt_findings ) exp = 1 ).
     cl_abap_unit_assert=>assert_char_cp( act = mo_cut->mt_findings[ 1 ]-title exp = '*never been backed up*' ).

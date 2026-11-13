@@ -7,7 +7,7 @@ One readable report with three sections (each can be switched on/off):
    plain-language explanation for common kinds (database errors, cancelled transactions, background jobs,
    invalid profile parameters, ICM/ports, OS errors, work process restarts, RFC, logon, buffers, start-up events),
    SAP's own documentation for the message and the text of cancel messages. Information messages are hidden
-   unless "Include information messages" is set.
+   unless "Also SM21 information messages" is set.
 3. **Database (DB02)**, SAP ASE (Sybase) only: data space and transaction log per database (same calculation as
    DBA Cockpit), offline databases, log backups / automatic log truncation, log and data on one device, and the
    10 largest tables with clean-up hints (e.g. SNAP → RSSNAPDL, TST03 → RSPO1041, BALDAT → SLG2).
@@ -28,24 +28,34 @@ Read-only: it changes nothing in the system.
 
 **No AI API? Use the AI export.** Output "AI export file" saves all collected facts as one Markdown file
 (with user, system and server names; optional anonymization) that you upload into a browser AI together with the prompt in
-[AI_REPORT_PROMPT.md](AI_REPORT_PROMPT.md). Example file: [examples/ai_export_example.md](examples/ai_export_example.md).
+[AI_REPORT_PROMPT.md](AI_REPORT_PROMPT.md).
+
+## Install
+1. SE38: create the executable program `ZDUMP_EXPLAINER` (e.g. local in `$TMP`).
+2. Paste the content of `src/zdump_explainer.prog.abap`, save and activate.
+
+That is all: the selection screen texts are set in the code, so no text elements need to be maintained.
+Requires SAP NetWeaver 7.50 or higher. The database section works on SAP ASE (Sybase) only; on other databases
+it says so and the other sections work as usual.
 
 ## Run
 SE38 → `ZDUMP_EXPLAINER`
 
-| Field | Meaning |
+| Field on the screen | Meaning |
 |---|---|
-| Short dumps / System log / Database | which sections to analyse (default: all) |
-| Include information messages | also show SM21 information messages (work process start/stop etc.) |
-| Date | default: last 7 days; used for short dumps and the system log |
+| Short dumps / System log / Database space | which areas to analyse (default: all) |
+| Also SM21 information messages | also show SM21 information messages (work process start/stop etc.) |
+| Period (date) | default: last 7 days; used for short dumps and the system log |
 | User, Client | optional filters (short dumps and system log) |
-| Runtime error, App server | optional filters (short dumps) |
-| Only own code | only dumps in Z/Y/namespace programs |
-| HTML report / ALV overview / AI export file | how to show the result (ALV covers short dumps only) |
-| Save to file | HTML report: e.g. `C:\temp\dumps.html` to share by e-mail. AI export: empty = save dialog |
-| Anonymize users and servers | AI export: replace names by USER_nn / SERVER_nn (default off) |
-| Include source code | AI export: 7 source lines around each failing line (default on) |
-| Text language | for SAP's error texts |
+| Runtime error, Application server | optional filters (short dumps) |
+| Only own code (Z/Y) dumps | only dumps in Z/Y/namespace programs |
+| HTML report / ALV list / AI export file | how to show the result (ALV covers short dumps only) |
+| Save to file (full path) | HTML report: e.g. `C:\temp\dumps.html` to share by e-mail. AI export: empty = save dialog |
+| Language of SAP texts | for SAP's error texts and documentation |
+
+Two AI export options are hidden (not on the screen; set them with `SUBMIT ... WITH`, or remove `NO-DISPLAY`):
+`P_AISRC` include source code lines (default on), `P_ANON` replace names by USER_nn / SERVER_nn (default off).
+F4 on "Save to file" opens the Windows save dialog.
 
 **Daily job:** save a variant (e.g. date = yesterday via dynamic date selection) and schedule it in SM36.
 In background it writes a plain list to the spool - or, with "AI export file", the export text.
@@ -54,15 +64,11 @@ In background it writes a plain list to the spool - or, with "AI export file", t
 | File | Purpose |
 |---|---|
 | `src/zdump_explainer.prog.abap` | the program |
-| `CLAUDE.md` | instructions for Claude Code (system facts and coding rules) |
-| `SETUP_CLAUDE_CODE.md` | connect Claude Code to the SAP VM via ADT |
-| `PROMPT.md` | ready-made prompt to deploy and test the program |
 | `AI_REPORT_PROMPT.md` | how to use the AI export, and the prompt for the browser AI |
-| `examples/ai_export_example.md` | an AI export from the practice system (anonymized) |
 | `abaplint.json` | syntax check config for ABAP 7.50 |
 
 ## Notes
-- Deployed and tested on the NPL practice system (7.52, SAP ASE); the background list was verified via a test job.
+- Tested on SAP NetWeaver 7.52 with SAP ASE.
 - Structure: `lcl_report` (selection screen, output) uses the sections `lcl_dump_section`, `lcl_syslog` and
   `lcl_dbcheck` through the interface `lif_section`; `lcl_util` holds shared helpers.
 - `lcl_anonymizer` replaces user and server names in the AI export, also inside free texts.

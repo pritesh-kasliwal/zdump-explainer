@@ -1,2 +1,8 @@
 .env
 node_modules/
+
+# Local only - not part of the shared project
+CLAUDE.md
+SETUP_CLAUDE_CODE.md
+PROMPT.md
+src/zdump_test.prog.abap

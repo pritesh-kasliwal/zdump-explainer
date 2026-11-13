@@ -7,25 +7,24 @@ prompt below, and the AI writes the report.
 ## 1. Before you start
 
 - **Check your company's AI rules.** Only upload to an AI tool your company allows for internal data.
-- **User, system and server names are kept** by default, so the report shows who has the problem and
-  where. If you ever need to hide them, tick "Anonymize users and servers": user names then become
-  `USER_01`, `USER_02`, ... and server names `SERVER_01`, ... (the same name always gets the same alias,
-  also inside message texts).
-- **Source code:** "Include source code" adds 7 lines around each failing line. If your company does
-  not allow sharing code, switch it off - the report is then less precise for own (Z/Y) programs.
+- **What the file contains:** user, system and server names (so the report shows who has the problem
+  and where) and 7 lines of source code around each failing line.
+- **Hidden options:** if your company does not allow names or code in an AI tool, two options exist
+  that are not on the screen: `P_ANON = X` replaces names by `USER_01`, `SERVER_01`, ... (also inside
+  message texts), and `P_AISRC = space` leaves out the source code. They can be set with
+  `SUBMIT zdump_explainer WITH p_anon = 'X' ...` from a small calling program, or shown on the
+  screen again by removing `NO-DISPLAY` in the source code.
 
 ## 2. Create the file
 
 1. SE38 → `ZDUMP_EXPLAINER`.
 2. Choose the areas (short dumps, system log, database) and the period.
-3. Output: select **AI export file**. Leave "Save to file" empty - a save dialog opens
-   (or enter a full path, e.g. `C:\temp\sap_problems.md`).
+3. Output: select **AI export file (Markdown)**. Leave "Save to file (full path)" empty - a save
+   dialog opens (or enter a full path, e.g. `C:\temp\sap_problems.md`).
 4. Execute (F8). The program saves `SAP_problems_<SID>_<date>.md`.
 
 Without access to SAP GUI downloads: run the same variant as a background job (F9). The export is
 then written to the spool, which you can save from SM37 / SP01.
-
-An example export from a practice system is in [examples/ai_export_example.md](examples/ai_export_example.md).
 
 ## 3. Ask the AI
 
@@ -142,7 +141,5 @@ same structure in Markdown.
   fixes for production systems - before you act on them.
 - Open every SAP Note link before you rely on it. AI models sometimes give note numbers that do
   not exist or belong to a different problem; that is why the prompt marks them "please verify".
-- The example file was exported with "Anonymize users and servers" switched on, so it shows
-  aliases. Your own exports show the real names unless you tick that option.
 - The program's own HTML report (output "HTML report") needs no AI and stays inside SAP. Use the AI
   export when you want a second opinion or a report written in a different way.
